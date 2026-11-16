@@ -1,16 +1,27 @@
-// Repertoire editor: browse the move tree, add/remove moves, import/export PGN.
+// Repertoire editor: browse the move tree, add/remove moves, import/export PGN,
+// and list coverage gaps.
 
 import { Chess } from 'chess.js';
-import { state, save, touchTrees, countMoves } from './store.js';
+import { state, save, touchTrees, countMoves, getTreeVersion } from './store.js';
+import { getDeck, moveState } from './srs.js';
+import { nameForLine, splitName } from './openings.js';
+import { findGaps } from './gaps.js';
 import { importPgn, exportPgn } from './pgn.js';
 import { createBoard } from './board.js';
-import { h, modal, confirmDialog, toast, download, pickFiles } from './ui.js';
+import { h, modal, confirmDialog, toast, download, pickFiles, formatLine } from './ui.js';
+
+const MAX_GAPS = 150;
+const moveLabel = (san, ply) => `${Math.floor(ply / 2) + 1}${ply % 2 === 0 ? '.' : '…'} ${san}`;
 
 let rememberedColor = 'white';
 
 export function mountRepertoire(root) {
   let color = rememberedColor;
   let path = []; // nodes from the root to the selected move
+  let view = 'moves'; // 'moves' | 'gaps'
+  let allGaps = false; // also list the rarer book replies
+  let hint = null; // arrow to show on the next board update
+  let gapCache = null; // { key, gaps }
 
   const boardEl = h('div.board');
   const panel = h('div.panel.rep');
@@ -35,6 +46,8 @@ export function mountRepertoire(root) {
   function sync() {
     const { chess, last } = position();
     board.show(chess, { orientation: color, movable: 'both', lastMove: last ? [last.from, last.to] : null });
+    board.arrows(hint ? [hint] : []);
+    hint = null;
     render();
   }
 
@@ -146,6 +159,62 @@ export function mountRepertoire(root) {
     download(`${color}-repertoire.pgn`, exportPgn(tree(), color), 'application/x-chess-pgn');
   }
 
+  // ---------- coverage gaps ----------
+
+  function gaps() {
+    const key = `${color}:${getTreeVersion()}`;
+    if (!gapCache || gapCache.key !== key) gapCache = { key, gaps: findGaps(color) };
+    return gapCache.gaps;
+  }
+
+  /** Jump to the position of a gap so the missing moves can be added. */
+  function openGap(gap) {
+    view = 'moves';
+    const label = moveLabel(gap.san, gap.sans.length);
+    if (gap.type === 'unanswered') {
+      const parent = gap.nodes.length ? gap.nodes[gap.nodes.length - 1] : tree();
+      const node = parent.children.find((c) => c.san === gap.san);
+      toast(`Play your answer to ${label} on the board`);
+      return goTo(node ? [...gap.nodes, node] : gap.nodes.slice());
+    }
+    path = gap.nodes.slice();
+    try {
+      const { chess } = position();
+      const mv = chess.move(gap.san);
+      hint = { from: mv.from, to: mv.to, brush: 'yellow' };
+    } catch { hint = null; }
+    toast(`Play ${label} on the board, then your answer`);
+    sync();
+  }
+
+  function renderGaps() {
+    const all = gaps();
+    const common = all.filter((g) => g.common);
+    const list = (allGaps ? all : common).slice(0, MAX_GAPS);
+    const box = h('div.tree.gaps');
+    if (!list.length) {
+      box.append(h('div.tree-empty',
+        h('strong', all.length ? 'No common gaps' : 'No gaps found'),
+        h('span', all.length
+          ? 'Every common reply in the opening book has an answer. Rarer replies are still listed under "Show rare too".'
+          : 'The opening book has no replies you are missing here.')));
+    }
+    for (const g of list) {
+      box.append(h('button.gap', { onclick: () => openGap(g) },
+        h('div.gap-top',
+          h('span.gap-move', moveLabel(g.san, g.sans.length)),
+          g.name ? h('span.gap-name', splitName(g.name).title) : null,
+          g.type === 'unanswered' ? h('span.gap-tag', 'no answer') : h('span.gap-share', `${g.lines} ${g.lines === 1 ? 'line' : 'lines'}`)),
+        g.sans.length ? h('div.gap-line', `after ${formatLine(g.sans)}`) : null));
+    }
+    const head = h('div.gap-head',
+      h('span', `${allGaps ? all.length : common.length} ${allGaps ? 'gaps' : 'common gaps'}${list.length < (allGaps ? all.length : common.length) ? `, first ${list.length} shown` : ''}`),
+      all.length > common.length
+        ? h('button.btn.ghost.small', { onclick: () => { allGaps = !allGaps; render(); } }, allGaps ? 'Common only' : 'Show rare too')
+        : null);
+    return [head, box];
+  }
+
   // ---------- rendering ----------
 
   function moveEl(node, nodePath, ply, forceNumber) {
@@ -153,7 +222,8 @@ export function mountRepertoire(root) {
     const label = ply % 2 === 0 ? `${num}. ${node.san}` : forceNumber ? `${num}… ${node.san}` : node.san;
     const mine = (ply % 2 === 0) === (color === 'white');
     const active = path.length && path[path.length - 1] === node;
-    return h(`span.mv${mine ? '.mine' : ''}${active ? '.active' : ''}`, { onclick: () => goTo(nodePath) }, label);
+    const st = mine ? `.st-${moveState(getDeck().keyOf.get(node))}` : '';
+    return h(`span.mv${mine ? '.mine' : ''}${st}${active ? '.active' : ''}`, { onclick: () => goTo(nodePath) }, label);
   }
 
   function renderLine(container, parent, parentPath, ply, forceNumber) {
@@ -187,6 +257,8 @@ export function mountRepertoire(root) {
   function render() {
     const node = path.length ? path[path.length - 1] : null;
     const parent = node ? parentOf(path.length - 1) : null;
+    const openingName = nameForLine(path.map((n) => n.san));
+    const opening = openingName ? splitName(openingName) : null;
     const treeBox = h('div.tree');
     if (tree().children.length) renderLine(treeBox, tree(), [], 0, false);
     else treeBox.append(h('div.tree-empty',
@@ -214,8 +286,14 @@ export function mountRepertoire(root) {
           h('button.btn.small', { onclick: doExport }, 'Export PGN'),
         ),
       ),
-      treeBox,
-      note,
+      h('div.rep-tabs',
+        h(`button.tab${view === 'moves' ? '.on' : ''}`, { onclick: () => { view = 'moves'; render(); } }, 'Moves'),
+        h(`button.tab${view === 'gaps' ? '.on' : ''}`, { onclick: () => { view = 'gaps'; render(); } }, 'Gaps'),
+        h('div.spacer'),
+        opening ? h('div.opening', { title: opening.title }, h('span.eco', opening.eco), opening.title) : null,
+      ),
+      ...(view === 'gaps' ? renderGaps() : [treeBox]),
+      view === 'moves' ? note : null,
       h('div.rep-nav',
         h('button.btn.icon', { title: 'Start (↑)', onclick: () => goTo([]), disabled: !node }, '⏮'),
         h('button.btn.icon', { title: 'Back (←)', onclick: back, disabled: !node }, '◀'),
@@ -225,7 +303,12 @@ export function mountRepertoire(root) {
         node && parent.children[0] !== node ? h('button.btn.small', { onclick: makeMain, title: 'Make this the main line' }, 'Make main') : null,
         h('button.btn.small.danger-ghost', { onclick: removeCurrent, disabled: !node }, 'Delete move'),
       ),
-      h('div.footnote', 'Play a move on the board to add it. Your own moves are the highlighted ones — those are what you get quizzed on.'),
+      view === 'gaps'
+        ? h('div.footnote', 'Opponent moves you have no answer to. The count is how many named opening-book lines follow that move: a rough guide to how standard it is, not game statistics.')
+        : h('div.footnote',
+          h('div.legend', ['new', 'learn', 'young', 'mature'].map((k) =>
+            h('span.legend-item', h(`span.dot-st.st-${k}`), { new: 'New', learn: 'Learning', young: 'Young', mature: 'Mature' }[k]))),
+          'Play a move on the board to add it. The dotted moves are yours, the ones you get quizzed on.'),
     ].filter(Boolean));
     const act = treeBox.querySelector('.mv.active');
     if (act) act.scrollIntoView({ block: 'nearest' });

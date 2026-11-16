@@ -19,6 +19,7 @@ function blank() {
     srs: {},
     settings: { ...DEFAULT_SETTINGS },
     daily: { day: 0, newCount: 0, extra: 0 },
+    lastLine: '', // the full line played most recently, so the next one differs
   };
 }
 
@@ -32,6 +33,7 @@ function normalize(data) {
     srs: data.srs && typeof data.srs === 'object' ? data.srs : {},
     settings: { ...DEFAULT_SETTINGS, ...(data.settings || {}) },
     daily: { ...base.daily, ...(data.daily || {}) },
+    lastLine: typeof data.lastLine === 'string' ? data.lastLine : '',
   };
 }
 

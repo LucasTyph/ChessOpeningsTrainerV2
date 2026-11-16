@@ -17,17 +17,23 @@ export function getDeck() {
   const cards = [];
   const byKey = new Map();
   const alts = new Map(); // posKey -> Set of repertoire SANs there
+  const keyOf = new Map(); // tree node (one of your moves) -> card key
+  const lines = []; // every root-to-leaf line: { color, sans, steps: [{ ply, key, posKey }] }
   for (const color of ['white', 'black']) {
     const chess = new Chess();
     const path = [];
+    const steps = [];
     const walk = (node) => {
       const mine = (chess.turn() === 'w') === (color === 'white');
       const posKey = mine ? `${color}|${fenKey(chess.fen())}` : null;
+      if (!node.children.length && steps.length) lines.push({ color, sans: path.slice(), steps: steps.slice() });
       for (const child of node.children) {
         if (mine) {
           if (!alts.has(posKey)) alts.set(posKey, new Set());
           alts.get(posKey).add(child.san);
           const key = `${posKey}|${child.san}`;
+          keyOf.set(child, key);
+          steps.push({ ply: path.length, key, posKey });
           const known = byKey.get(key);
           if (!known) {
             const card = { key, color, posKey, san: child.san, path: path.slice(), comment: child.comment || '' };
@@ -35,16 +41,20 @@ export function getDeck() {
             cards.push(card);
           } else if (!known.comment && child.comment) known.comment = child.comment;
         }
-        try { chess.move(child.san); } catch { continue; }
-        path.push(child.san);
-        walk(child);
-        path.pop();
-        chess.undo();
+        let ok = true;
+        try { chess.move(child.san); } catch { ok = false; }
+        if (ok) {
+          path.push(child.san);
+          walk(child);
+          path.pop();
+          chess.undo();
+        }
+        if (mine) steps.pop();
       }
     };
     walk(state.trees[color]);
   }
-  cache = { cards, alts };
+  cache = { cards, alts, keyOf, lines };
   cacheVersion = getTreeVersion();
   return cache;
 }
@@ -113,7 +123,46 @@ export function allowMoreNew(n) {
   daily().extra += n;
 }
 
-export const cardKind = (card) => {
+/** Progress of one of your moves: 'new' | 'learn' | 'young' | 'mature'. */
+export function moveState(key) {
+  const s = state.srs[key];
+  if (!s) return 'new';
+  if (s.s === 'learn') return 'learn';
+  return s.ivl >= 21 ? 'mature' : 'young';
+}
+
+/**
+ * Pick one line to play through in full: a random root-to-leaf line, cut off
+ * before the first move you have not started learning. Avoids `avoid` (the
+ * line played last time) when there is another choice. Returns null if no
+ * line has at least two of your moves started (or one, if that is all there is).
+ */
+export function pickLine(avoid = '') {
+  const { lines } = getDeck();
+  const byText = new Map();
+  for (const line of lines) {
+    const known = [];
+    for (const step of line.steps) {
+      if (!state.srs[step.key]) break;
+      known.push(step);
+    }
+    if (!known.length) continue;
+    const sans = line.sans.slice(0, known[known.length - 1].ply + 1);
+    const id = `${line.color}:${sans.join(' ')}`;
+    if (!byText.has(id)) byText.set(id, { id, color: line.color, sans, steps: known });
+  }
+  // Drop lines that are just the opening moves of a longer candidate. Sorted,
+  // any such longer line comes right after its prefix (space sorts first).
+  const sorted = [...byText.values()].sort((a, b) => (a.id < b.id ? -1 : 1));
+  let pool = sorted.filter((a, i) => !(sorted[i + 1] && sorted[i + 1].id.startsWith(a.id + ' ')));
+  const long = pool.filter((l) => l.steps.length >= 2);
+  if (long.length) pool = long;
+  const fresh = pool.filter((l) => l.id !== avoid);
+  if (fresh.length) pool = fresh;
+  return pool.length ? pool[Math.floor(Math.random() * pool.length)] : null;
+}
+
+export const cardKind =(card) => {
   const s = state.srs[card.key];
   return !s ? 'new' : s.s === 'learn' ? 'learn' : 'review';
 };

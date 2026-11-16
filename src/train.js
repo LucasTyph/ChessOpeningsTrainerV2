@@ -2,7 +2,8 @@
 
 import { Chess } from 'chess.js';
 import { state, save, countMoves, touchTrees } from './store.js';
-import { getDeck, getToday, buildQueue, allowMoreNew, cardKind, introduce, grade } from './srs.js';
+import { getDeck, getToday, buildQueue, allowMoreNew, cardKind, introduce, grade, pickLine } from './srs.js';
+import { lookup, nameForLine, splitName } from './openings.js';
 import { createBoard } from './board.js';
 import { sfx } from './sound.js';
 import { h, sleep, formatLine } from './ui.js';
@@ -13,14 +14,21 @@ const SPEEDS = { slow: 560, normal: 340, fast: 170 };
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 const inDays = (n) => (n <= 0 ? 'today' : n === 1 ? 'tomorrow' : `in ${n} days`);
 
+function openingEl(name) {
+  if (!name) return null;
+  const { eco, title } = splitName(name);
+  return h('div.opening', h('span.eco', eco), title);
+}
+
 export function mountTrain(root, { go }) {
   const boardEl = h('div.board');
   const panel = h('div.panel');
   root.append(h('div.layout', h('div.board-wrap', boardEl), panel));
   const board = createBoard(boardEl, { onUserMove });
 
-  let session = null; // { queue, initial, finished, answered, correct }
-  let cur = null;     // { card, chess, mode, failed, phase, lastMove, status, answer }
+  let session = null; // { queue, initial, finished, answered, correct, line: { total, clean } | undefined }
+  let cur = null;     // card: { card, chess, mode: 'intro' | 'quiz', failed, phase, lastMove, status, answer, names }
+                      // full line: { line, chess, mode: 'line', ply, step, failed, phase, lastMove, status, answer, name }
   let token = 0;      // bumps whenever the current card/screen changes, cancelling pending timers
 
   const onKey = (e) => {
@@ -30,6 +38,7 @@ export function mountTrain(root, { go }) {
     e.preventDefault();
     if (cur.phase === 'await') next();
     else if (cur.phase === 'input' && cur.mode === 'quiz') reveal();
+    else if (cur.phase === 'input' && cur.mode === 'line') revealLine();
   };
   document.addEventListener('keydown', onKey);
 
@@ -62,15 +71,21 @@ export function mountTrain(root, { go }) {
       return;
     }
 
-    if (finished) {
+    if (finished && (finished.initial || finished.line)) {
       const acc = finished.answered ? Math.round((finished.correct / finished.answered) * 100) : null;
-      panel.append(
-        h('div.eyebrow.ok', 'Session complete'),
+      const lineText = finished.line
+        ? `Full line: ${finished.line.clean} of ${plural(finished.line.total, 'move')} right first time.`
+        : null;
+      panel.append(...[
+        h('div.eyebrow.ok', finished.initial ? 'Session complete' : 'Line complete'),
         h('h2', 'Nicely done'),
-        h('p.muted', acc === null
-          ? `${plural(finished.finished, 'move')} practised.`
-          : `${plural(finished.finished, 'move')} practised · ${acc}% right first time.`),
-      );
+        finished.initial
+          ? h('p.muted', acc === null
+            ? `${plural(finished.finished, 'move')} practised.`
+            : `${plural(finished.finished, 'move')} practised · ${acc}% right first time.`)
+          : null,
+        lineText ? h('p.muted', lineText) : null,
+      ].filter(Boolean));
     } else {
       panel.append(h('div.eyebrow', 'Today'), h('h2', todo ? 'Ready to train' : 'All caught up'));
     }
@@ -92,6 +107,7 @@ export function mountTrain(root, { go }) {
         panel.append(h('button.btn', { onclick: () => { allowMoreNew(n); save(); showHome(); } },
           `Learn ${n} more new ${n === 1 ? 'move' : 'moves'}`));
       }
+      if (pickLine()) panel.append(h('button.btn', { onclick: startLineOnly }, 'Play a full line'));
     }
 
     const w = countMoves(state.trees.white);
@@ -129,6 +145,9 @@ export function mountTrain(root, { go }) {
   async function next() {
     if (!session) return;
     if (!session.queue.length) {
+      // Every session ends with one line played through in full.
+      const line = session.line ? null : pickLine(state.lastLine);
+      if (line) return startLine(line);
       const done = session;
       return showHome(done);
     }
@@ -139,6 +158,7 @@ export function mountTrain(root, { go }) {
       card, chess,
       mode: cardKind(card) === 'new' ? 'intro' : 'quiz',
       failed: false, phase: 'leadin', lastMove: null, status: null, answer: null,
+      names: [nameForLine(card.path), nameForLine([...card.path, card.san])],
     };
     const n = card.path.length;
     const delay = Math.max(85, Math.min(SPEEDS[state.settings.speed] || SPEEDS.normal, 3600 / Math.max(1, n)));
@@ -179,8 +199,12 @@ export function mountTrain(root, { go }) {
   }
 
   function onUserMove({ from, to, promotion }) {
-    const restore = () => cur && board.show(cur.chess, { movable: cur.phase === 'input' ? cur.card.color : false, lastMove: cur.lastMove });
+    const restore = () => cur && board.show(cur.chess, {
+      movable: cur.phase === 'input' ? (cur.mode === 'line' ? cur.line.color : cur.card.color) : false,
+      lastMove: cur.lastMove,
+    });
     if (!cur || cur.phase !== 'input') return restore();
+    if (cur.mode === 'line') return onLineMove({ from, to, promotion }, restore);
     const { card, chess } = cur;
     let mv;
     try { mv = chess.move({ from, to, promotion }); } catch { return restore(); }
@@ -287,6 +311,7 @@ export function mountTrain(root, { go }) {
         ),
       ),
       h('div.line', (formatLine(shown) || 'Starting position') + blank),
+      openingEl(cur.names[cur.done ? 1 : 0]),
       cur.status ? h(`div.status.${cur.status.kind}`, cur.status.text) : h('div.status.idle', cur.phase === 'leadin' ? ' ' : 'Play your move on the board'),
       cur.done && card.comment ? h('div.note', card.comment) : null,
       h('div.spacer'),
@@ -296,6 +321,155 @@ export function mountTrain(root, { go }) {
           ? h('button.btn', { onclick: reveal, disabled: cur.failed }, 'Show answer')
           : null,
       h('div.footnote', 'Space shows the answer or continues'),
+    ].filter(Boolean));
+  }
+
+  // ---------- full line ----------
+
+  function startLineOnly() {
+    session = { queue: [], initial: 0, finished: 0, answered: 0, correct: 0 };
+    next();
+  }
+
+  function startLine(line) {
+    const my = ++token;
+    session.line = { total: line.steps.length, clean: 0 };
+    state.lastLine = line.id;
+    save();
+    cur = {
+      line, chess: new Chess(), mode: 'line', ply: 0, step: 0,
+      failed: false, phase: 'leadin', lastMove: null, status: null, answer: null, name: null,
+    };
+    board.setSpeed(180);
+    board.arrows([]);
+    board.show(cur.chess, { orientation: line.color, movable: false });
+    renderLine();
+    setTimeout(() => { if (my === token) advanceLine(); }, 450);
+  }
+
+  function playLineMove(san) {
+    const mv = cur.chess.move(san);
+    cur.lastMove = [mv.from, mv.to];
+    cur.ply++;
+    const entry = lookup(cur.chess.fen());
+    if (entry && entry.name) cur.name = entry.name;
+    board.show(cur.chess, { movable: false, lastMove: cur.lastMove });
+    return mv;
+  }
+
+  /** Auto-play the opponent's moves until it is your turn or the line ends. */
+  async function advanceLine() {
+    const my = token;
+    const { line, chess } = cur;
+    const delay = SPEEDS[state.settings.speed] || SPEEDS.normal;
+    while (cur.ply < line.sans.length) {
+      const mine = (cur.ply % 2 === 0) === (line.color === 'white');
+      if (mine) {
+        const ans = chess.move(line.sans[cur.ply]);
+        chess.undo();
+        cur.answer = { from: ans.from, to: ans.to };
+        cur.failed = false;
+        cur.phase = 'input';
+        board.show(chess, { movable: line.color, lastMove: cur.lastMove });
+        renderLine();
+        return;
+      }
+      cur.phase = 'leadin';
+      await sleep(delay);
+      if (my !== token) return;
+      playLineMove(line.sans[cur.ply]);
+      renderLine();
+    }
+    cur.phase = 'locked';
+    cur.done = true;
+    cur.status = { kind: 'ok', text: `${session.line.clean} of ${session.line.total} right first time` };
+    renderLine();
+    await sleep(1400);
+    if (my !== token) return;
+    const done = session;
+    showHome(done);
+  }
+
+  function revealLine() {
+    if (!cur || cur.mode !== 'line' || cur.phase !== 'input') return;
+    cur.failed = true;
+    board.arrows([{ ...cur.answer, brush: 'blue' }]);
+    cur.status = { kind: 'bad', text: `The move is ${cur.line.sans[cur.ply]} — play it to continue` };
+    renderLine();
+  }
+
+  function onLineMove({ from, to, promotion }, restore) {
+    const { line, chess } = cur;
+    const want = line.sans[cur.ply];
+    const my = token;
+    let mv;
+    try { mv = chess.move({ from, to, promotion }); } catch { return restore(); }
+    chess.undo();
+
+    if (mv.san === want) {
+      const clean = !cur.failed;
+      cur.phase = 'locked';
+      board.arrows([]);
+      playLineMove(want);
+      cur.step++;
+      cur.status = clean ? { kind: 'ok', text: 'Correct' } : null;
+      if (clean) {
+        session.line.clean++;
+        board.flash(mv.to, 'correct');
+        sfx.correct();
+      }
+      renderLine();
+      advanceLine();
+      return;
+    }
+
+    if (!cur.failed && getDeck().alts.get(line.steps[cur.step].posKey)?.has(mv.san)) {
+      cur.status = { kind: 'info', text: `${mv.san} is in your repertoire too — this line continues differently` };
+      renderLine();
+      setTimeout(() => { if (my === token) restore(); }, 380);
+      return;
+    }
+
+    cur.phase = 'locked';
+    cur.failed = true;
+    board.flash(to, 'wrong');
+    board.shake();
+    sfx.wrong();
+    cur.status = { kind: 'bad', text: `Not ${mv.san} — the move is ${want}` };
+    renderLine();
+    setTimeout(() => {
+      if (my !== token) return;
+      cur.phase = 'input';
+      restore();
+      board.arrows([{ ...cur.answer, brush: 'blue' }]);
+      renderLine();
+    }, 560);
+  }
+
+  function renderLine() {
+    const { line } = cur;
+    const total = line.steps.length;
+    const side = line.color === 'white' ? 'White' : 'Black';
+    const pct = Math.round((cur.step / total) * 100);
+    panel.replaceChildren(...[
+      h('div.session-top',
+        h('div.counts', h('span.count.line', cur.done ? 'Done' : `Move ${Math.min(cur.step + 1, total)} of ${total}`)),
+        h('button.btn.ghost.small', { onclick: () => showHome(session) }, cur.done ? 'Finish' : 'Skip line'),
+      ),
+      h('div.progress', h('div.progress-bar', { style: `width:${pct}%` })),
+      h('div.prompt',
+        h(`span.side-chip.${line.color}`),
+        h('div',
+          h('div.eyebrow', 'Full line'),
+          h('h2', cur.done ? 'Line complete' : cur.phase === 'input' ? `${side} to play` : `Playing as ${side}`),
+        ),
+      ),
+      h('div.line', formatLine(line.sans.slice(0, cur.ply)) || 'Starting position'),
+      openingEl(cur.name),
+      cur.status ? h(`div.status.${cur.status.kind}`, cur.status.text) : h('div.status.idle', 'Play every one of your moves from memory'),
+      h('div.spacer'),
+      cur.phase === 'input' ? h('button.btn', { onclick: revealLine, disabled: cur.failed }, 'Show move') : null,
+      h('div.footnote', 'Extra practice: this line does not change your review schedule'),
     ].filter(Boolean));
   }
 

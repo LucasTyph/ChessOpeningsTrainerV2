@@ -83,4 +83,42 @@ assert.equal(g.again, true);
 assert.equal(state.srs[card.key].s, 'learn');
 assert.ok(state.srs[card.key].ease < 2.5);
 
+// --- opening book ---
+const { nameForLine, lookup } = await import('../src/openings.js');
+const { Chess } = await import('chess.js');
+assert.match(nameForLine(['e4', 'e5', 'Nf3', 'Nc6', 'Bb5']), /^C\d\d Ruy Lopez/);
+assert.match(nameForLine(['e4', 'c5']), /Sicilian Defense/);
+assert.equal(nameForLine([]), null);
+// named by position, so a transposition gets the same name
+assert.equal(nameForLine(['Nf3', 'd5', 'd4']), nameForLine(['d4', 'd5', 'Nf3']));
+const startMoves = lookup(new Chess().fen()).moves.map((m) => m.san);
+assert.ok(startMoves.indexOf('e4') < 2 && startMoves.includes('d4'), startMoves.slice(0, 4).join());
+
+// --- full line ---
+const { pickLine, moveState } = await import('../src/srs.js');
+state.srs = {};
+assert.equal(pickLine(), null, 'no line before anything is learned');
+const main = deck.lines.find((l) => l.color === 'white' && l.sans.join(' ').startsWith('e4 e5 Nf3 Nc6 Bc4 Bc5'));
+main.steps.slice(0, 3).forEach((st) => { state.srs[st.key] = { s: 'review', ivl: 30, due: today() + 5, ease: 2.5, lapses: 0 }; });
+const line = pickLine();
+assert.equal(line.color, 'white');
+assert.deepEqual(line.sans, ['e4', 'e5', 'Nf3', 'Nc6', 'Bc4'], 'cut before the first unlearned move');
+assert.equal(line.steps.length, 3);
+assert.equal(moveState(main.steps[0].key), 'mature');
+assert.equal(moveState(main.steps[3].key), 'new');
+
+// --- coverage gaps ---
+const { findGaps } = await import('../src/gaps.js');
+const gaps = findGaps('white');
+const caro = gaps.find((x) => x.type === 'missing' && x.sans.join(' ') === 'e4' && x.san === 'c6');
+assert.ok(caro && /Caro-Kann/.test(caro.name) && caro.common, 'Caro-Kann is a common gap after 1. e4');
+assert.ok(!gaps.some((x) => x.sans.join(' ') === 'e4' && x.san === 'e5'), 'covered replies are not gaps');
+const bare = { children: [] };
+importPgn('1. e4 e5 2. Nf3 Nc6 *', bare);
+state.trees.white = bare;
+touchTrees();
+const un = findGaps('white').filter((x) => x.type === 'unanswered');
+assert.deepEqual(un.map((x) => x.san), ['Nc6']);
+assert.equal(findGaps('white')[0].type, 'unanswered', 'unanswered moves come first');
+
 console.log(`ok — ${deck.cards.length} cards, ${whiteMoves} white-tree moves`);

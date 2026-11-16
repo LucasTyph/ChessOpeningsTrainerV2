@@ -1,4 +1,4 @@
-// Bundles src/ into a single self-contained "Chess Openings Trainer.html".
+// Bundles src/ into a single self-contained "ChessOpeningsTrainer.html".
 import { build } from 'esbuild';
 import { writeFileSync } from 'node:fs';
 
@@ -32,5 +32,5 @@ const html = `<!doctype html>
 </html>
 `;
 
-writeFileSync('Chess Openings Trainer.html', html);
-console.log(`Built "Chess Openings Trainer.html" (${Math.round(html.length / 1024)} KB)`);
+writeFileSync('ChessOpeningsTrainer.html', html);
+console.log(`Built "ChessOpeningsTrainer.html" (${Math.round(html.length / 1024)} KB)`);

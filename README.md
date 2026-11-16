@@ -10,7 +10,7 @@ Open it online: <https://lucastyph.github.io/ChessOpeningsTrainerV2/>
 
 Or run it from your own computer:
 
-1. Download [`Chess Openings Trainer.html`](Chess%20Openings%20Trainer.html).
+1. Download [`ChessOpeningsTrainer.html`](ChessOpeningsTrainer.html).
 2. Double-click it.
 
 The online version and a downloaded copy keep separate progress. Use the backup
@@ -100,7 +100,7 @@ npm test
 npm run build
 ```
 
-`npm run build` writes `Chess Openings Trainer.html`. `npm test` checks the PGN,
+`npm run build` writes `ChessOpeningsTrainer.html`. `npm test` checks the PGN,
 scheduling, opening book and gap logic.
 
 The opening book in `src/openings-data.js` is generated and committed. To
